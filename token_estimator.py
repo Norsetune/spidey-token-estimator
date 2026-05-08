@@ -12,15 +12,28 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
-import os
 import re
-import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional
+import xml.etree.ElementTree as ET
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"}
+from bs4 import BeautifulSoup
+from pptx import Presentation
+
+SUPPORTED_EXTENSIONS = {
+    ".pdf",
+    ".docx",
+    ".pptx",
+    ".xlsx",
+    ".csv",
+    ".txt",
+    ".md",
+    ".html",
+    ".htm",
+    ".xml",
+}
+
 DEFAULT_CONTEXT_LIMIT = 1_000_000
 
 
@@ -83,18 +96,24 @@ def extract_pdf(path: Path, max_pages: Optional[int] = None) -> tuple[str, str]:
 
     notes = []
     chunks = []
+
     try:
         with fitz.open(path) as doc:
             page_count = len(doc)
             pages_to_read = page_count if max_pages is None else min(page_count, max_pages)
+
             for i in range(pages_to_read):
                 page = doc.load_page(i)
                 chunks.append(page.get_text("text"))
+
             notes.append(f"PDF pages read: {pages_to_read}/{page_count}")
+
             if max_pages is not None and page_count > max_pages:
                 notes.append("PDF truncated by max-pages option")
+
     except Exception as exc:
         return "", f"PDF extraction failed: {exc}"
+
     return clean_text("\n".join(chunks)), "; ".join(notes)
 
 
@@ -105,17 +124,43 @@ def extract_docx(path: Path) -> tuple[str, str]:
         return "", f"DOCX skipped: python-docx not installed ({exc})"
 
     chunks = []
+
     try:
         d = docx.Document(str(path))
+
         for p in d.paragraphs:
             if p.text:
                 chunks.append(p.text)
+
         for table in d.tables:
             for row in table.rows:
                 chunks.append("\t".join(cell.text for cell in row.cells))
-        return clean_text("\n".join(chunks)), f"DOCX paragraphs: {len(d.paragraphs)}, tables: {len(d.tables)}"
+
+        return clean_text("\n".join(chunks)), (
+            f"DOCX paragraphs: {len(d.paragraphs)}, tables: {len(d.tables)}"
+        )
+
     except Exception as exc:
         return "", f"DOCX extraction failed: {exc}"
+
+
+def extract_pptx_text(path: Path) -> str:
+    prs = Presentation(path)
+    parts = []
+
+    for slide_idx, slide in enumerate(prs.slides, start=1):
+        parts.append(f"\n--- Slide {slide_idx} ---\n")
+
+        for shape in slide.shapes:
+            if hasattr(shape, "text") and shape.text:
+                parts.append(shape.text)
+
+        if slide.has_notes_slide:
+            notes_text_frame = slide.notes_slide.notes_text_frame
+            if notes_text_frame and notes_text_frame.text:
+                parts.append(f"\n[Speaker notes]\n{notes_text_frame.text}")
+
+    return "\n".join(parts)
 
 
 def extract_xlsx(path: Path, max_cells: Optional[int] = None) -> tuple[str, str]:
@@ -126,23 +171,36 @@ def extract_xlsx(path: Path, max_cells: Optional[int] = None) -> tuple[str, str]
 
     chunks = []
     cell_count = 0
+
     try:
         wb = load_workbook(filename=path, read_only=True, data_only=False)
         sheet_count = len(wb.sheetnames)
+
         for ws in wb.worksheets:
             chunks.append(f"\n[SHEET: {ws.title}]\n")
+
             for row in ws.iter_rows():
                 vals = []
+
                 for cell in row:
                     if cell.value is not None:
                         vals.append(str(cell.value))
                         cell_count += 1
+
                         if max_cells is not None and cell_count >= max_cells:
                             chunks.append("\t".join(vals))
-                            return clean_text("\n".join(chunks)), f"XLSX sheets: {sheet_count}; cells read: {cell_count}; truncated by max-cells option"
+                            return clean_text("\n".join(chunks)), (
+                                f"XLSX sheets: {sheet_count}; cells read: {cell_count}; "
+                                "truncated by max-cells option"
+                            )
+
                 if vals:
                     chunks.append("\t".join(vals))
-        return clean_text("\n".join(chunks)), f"XLSX sheets: {sheet_count}; non-empty cells read: {cell_count}"
+
+        return clean_text("\n".join(chunks)), (
+            f"XLSX sheets: {sheet_count}; non-empty cells read: {cell_count}"
+        )
+
     except Exception as exc:
         return "", f"XLSX extraction failed: {exc}"
 
@@ -150,40 +208,116 @@ def extract_xlsx(path: Path, max_cells: Optional[int] = None) -> tuple[str, str]
 def extract_csv(path: Path, max_rows: Optional[int] = None) -> tuple[str, str]:
     chunks = []
     rows = 0
+
     try:
         with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
             sample = f.read(4096)
             f.seek(0)
+
             try:
                 dialect = csv.Sniffer().sniff(sample)
             except Exception:
                 dialect = csv.excel
+
             reader = csv.reader(f, dialect)
+
             for row in reader:
                 rows += 1
                 chunks.append("\t".join(row))
+
                 if max_rows is not None and rows >= max_rows:
-                    return clean_text("\n".join(chunks)), f"CSV rows read: {rows}; truncated by max-rows option"
+                    return clean_text("\n".join(chunks)), (
+                        f"CSV rows read: {rows}; truncated by max-rows option"
+                    )
+
         return clean_text("\n".join(chunks)), f"CSV rows read: {rows}"
+
     except Exception as exc:
         return "", f"CSV extraction failed: {exc}"
 
 
+def extract_html_text(path: Path) -> str:
+    raw = path.read_text(encoding="utf-8", errors="ignore")
+    soup = BeautifulSoup(raw, "html.parser")
+
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+
+    return soup.get_text(separator="\n", strip=True)
+
+
+def extract_xml_text(path: Path) -> str:
+    raw = path.read_text(encoding="utf-8", errors="ignore")
+
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return raw
+
+    parts = []
+
+    def walk(node, depth=0):
+        if node.tag:
+            parts.append(f"{'  ' * depth}<{node.tag}>")
+
+        if node.text and node.text.strip():
+            parts.append(node.text.strip())
+
+        for child in node:
+            walk(child, depth + 1)
+
+        if node.tail and node.tail.strip():
+            parts.append(node.tail.strip())
+
+    walk(root)
+    return "\n".join(parts)
+
+
 def extract_text(path: Path) -> tuple[str, str]:
     ext = path.suffix.lower()
+
     if ext == ".pdf":
         return extract_pdf(path)
+
     if ext == ".docx":
         return extract_docx(path)
+
+    if ext == ".pptx":
+        try:
+            text = extract_pptx_text(path)
+            return clean_text(text), "PPTX slides and speaker notes read"
+        except Exception as exc:
+            return "", f"PPTX extraction failed: {exc}"
+
     if ext == ".xlsx":
         return extract_xlsx(path)
+
     if ext == ".csv":
         return extract_csv(path)
+
     if ext in {".txt", ".md"}:
         try:
-            return clean_text(path.read_text(encoding="utf-8", errors="replace")), "Plain text/Markdown read"
+            return (
+                clean_text(path.read_text(encoding="utf-8", errors="replace")),
+                "Plain text/Markdown read",
+            )
         except Exception as exc:
             return "", f"Text extraction failed: {exc}"
+
+    if ext in {".html", ".htm"}:
+        try:
+            text = extract_html_text(path)
+            return clean_text(text), "HTML text extracted with scripts/styles removed"
+        except Exception as exc:
+            return "", f"HTML extraction failed: {exc}"
+
+    if ext == ".xml":
+        try:
+            text = extract_xml_text(path)
+            return clean_text(text), "XML text extracted from element tree"
+        except Exception as exc:
+            return "", f"XML extraction failed: {exc}"
+
     return "", f"Unsupported extension: {ext}"
 
 
@@ -193,10 +327,12 @@ def iter_files(paths: Iterable[Path]) -> Iterable[Path]:
             for p in sorted(path.rglob("*")):
                 if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS:
                     yield p
+
         elif path.is_file():
             if path.suffix.lower() == ".zip":
                 # For safety, do not auto-extract zip. Tell user to unzip intentionally.
                 continue
+
             if path.suffix.lower() in SUPPORTED_EXTENSIONS:
                 yield path
 
@@ -206,10 +342,12 @@ def estimate_file(path: Path, context_limit: int = DEFAULT_CONTEXT_LIMIT) -> Fil
     chars = len(text)
     words = len(re.findall(r"\S+", text))
     tokens = estimate_tokens(text)
+
     try:
         size_mb = path.stat().st_size / (1024 * 1024)
     except Exception:
         size_mb = 0.0
+
     return FileEstimate(
         file=str(path),
         extension=path.suffix.lower(),
@@ -227,6 +365,7 @@ def estimate_prompt(prompt: str, context_limit: int = DEFAULT_CONTEXT_LIMIT) -> 
     chars = len(text)
     words = len(re.findall(r"\S+", text))
     tokens = estimate_tokens(text)
+
     return FileEstimate(
         file="[PROMPT_TEXT]",
         extension="prompt",
@@ -242,6 +381,7 @@ def estimate_prompt(prompt: str, context_limit: int = DEFAULT_CONTEXT_LIMIT) -> 
 def summarize(estimates: List[FileEstimate], context_limit: int = DEFAULT_CONTEXT_LIMIT) -> dict:
     total = sum(e.estimated_tokens for e in estimates)
     pct = total / context_limit * 100
+
     if total >= context_limit:
         status = "OVER_LIMIT"
     elif pct >= 95:
@@ -252,7 +392,9 @@ def summarize(estimates: List[FileEstimate], context_limit: int = DEFAULT_CONTEX
         status = "CLOSE_TO_LIMIT"
     else:
         status = "SAFE"
+
     largest = sorted(estimates, key=lambda e: e.estimated_tokens, reverse=True)[:5]
+
     return {
         "context_limit": context_limit,
         "total_estimated_tokens": total,
@@ -264,43 +406,86 @@ def summarize(estimates: List[FileEstimate], context_limit: int = DEFAULT_CONTEX
 
 def print_table(estimates: List[FileEstimate], context_limit: int) -> None:
     estimates_sorted = sorted(estimates, key=lambda e: e.estimated_tokens, reverse=True)
+
     print("\nEstimated extracted-token budget")
     print("=" * 95)
     print(f"{'Tokens':>10}  {'%Limit':>7}  {'Words':>9}  {'MB':>7}  {'Risk':<22}  File")
     print("-" * 95)
+
     for e in estimates_sorted:
         pct = e.estimated_tokens / context_limit * 100
-        print(f"{e.estimated_tokens:>10,}  {pct:>6.1f}%  {e.words:>9,}  {e.size_mb:>7.2f}  {e.risk_band:<22}  {Path(e.file).name}")
+        print(
+            f"{e.estimated_tokens:>10,}  "
+            f"{pct:>6.1f}%  "
+            f"{e.words:>9,}  "
+            f"{e.size_mb:>7.2f}  "
+            f"{e.risk_band:<22}  "
+            f"{Path(e.file).name}"
+        )
+
     print("-" * 95)
     summary = summarize(estimates, context_limit)
-    print(f"TOTAL: {summary['total_estimated_tokens']:,} / {context_limit:,} tokens ({summary['percent_of_limit']}%)")
+    print(
+        f"TOTAL: {summary['total_estimated_tokens']:,} / "
+        f"{context_limit:,} tokens ({summary['percent_of_limit']}%)"
+    )
     print(f"STATUS: {summary['status']}")
     print("\nNote: This estimates parsed/extracted text tokens, not file size. Claude's exact tokenizer may differ.")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Estimate extracted token count for Spidey V2 prompt + files.")
-    parser.add_argument("paths", nargs="+", help="Files or folders to scan. Supported: PDF, DOCX, XLSX, CSV, TXT, MD.")
-    parser.add_argument("--prompt-file", help="Optional prompt text file to include in the estimate.")
-    parser.add_argument("--limit", type=int, default=DEFAULT_CONTEXT_LIMIT, help="Context limit. Default: 1,000,000 tokens.")
-    parser.add_argument("--json-out", help="Optional path to write JSON report.")
+    parser = argparse.ArgumentParser(
+        description="Estimate extracted token count for Spidey V2 prompt + files."
+    )
+
+    parser.add_argument(
+        "paths",
+        nargs="+",
+        help="Files or folders to scan. Supported: PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, HTML, XML.",
+    )
+
+    parser.add_argument(
+        "--prompt-file",
+        help="Optional prompt text file to include in the estimate.",
+    )
+
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_CONTEXT_LIMIT,
+        help="Context limit. Default: 1,000,000 tokens.",
+    )
+
+    parser.add_argument(
+        "--json-out",
+        help="Optional path to write JSON report.",
+    )
+
     args = parser.parse_args()
 
     estimates: List[FileEstimate] = []
+
     if args.prompt_file:
         prompt_path = Path(args.prompt_file)
         prompt = prompt_path.read_text(encoding="utf-8", errors="replace")
         estimates.append(estimate_prompt(prompt, args.limit))
 
     files = list(iter_files(Path(p) for p in args.paths))
+
     for f in files:
         estimates.append(estimate_file(f, args.limit))
 
     print_table(estimates, args.limit)
 
     if args.json_out:
-        report = {"summary": summarize(estimates, args.limit), "files": [asdict(e) for e in estimates]}
-        Path(args.json_out).write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        report = {
+            "summary": summarize(estimates, args.limit),
+            "files": [asdict(e) for e in estimates],
+        }
+        Path(args.json_out).write_text(
+            json.dumps(report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
         print(f"\nJSON report written to: {args.json_out}")
 
 
