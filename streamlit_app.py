@@ -11,10 +11,24 @@ from token_estimator import DEFAULT_CONTEXT_LIMIT, estimate_file, estimate_promp
 st.set_page_config(page_title="Spidey Context Budget Estimator", layout="wide")
 
 st.title("Spidey V2 Context Budget Estimator")
-st.caption("Estimate parsed/extracted text tokens from PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, HTML, and XML files. This is an approximation, not an exact Claude tokenizer.")
+st.caption(
+    "Estimate parsed/extracted text tokens from PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, HTML, and XML files. "
+    "This is an approximation, not an exact Claude tokenizer."
+)
 
-context_limit = st.number_input("Context limit", value=DEFAULT_CONTEXT_LIMIT, step=50_000, min_value=50_000)
-prompt_text = st.text_area("Paste prompt text here", height=180, placeholder="Optional: paste the turn prompt to include it in the budget.")
+context_limit = st.number_input(
+    "Context limit",
+    value=DEFAULT_CONTEXT_LIMIT,
+    step=50_000,
+    min_value=50_000,
+)
+
+prompt_text = st.text_area(
+    "Paste prompt text here",
+    height=180,
+    placeholder="Optional: paste the turn prompt to include it in the budget.",
+)
+
 files = st.file_uploader(
     "Upload files to estimate",
     type=["pdf", "docx", "pptx", "xlsx", "csv", "txt", "md", "html", "htm", "xml"],
@@ -23,21 +37,27 @@ files = st.file_uploader(
 
 if st.button("Estimate context budget", type="primary"):
     estimates = []
+
     if prompt_text.strip():
         estimates.append(estimate_prompt(prompt_text, int(context_limit)))
 
-with tempfile.TemporaryDirectory() as tmpdir:
-    for uploaded in files:
-        tmp_path = Path(tmpdir) / uploaded.name
-        tmp_path.write_bytes(uploaded.getvalue())
-        estimates.append(estimate_file(tmp_path, int(context_limit)))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for uploaded in files:
+            tmp_path = Path(tmpdir) / uploaded.name
+            tmp_path.write_bytes(uploaded.getvalue())
+            estimates.append(estimate_file(tmp_path, int(context_limit)))
 
     if not estimates:
         st.warning("Add a prompt and/or upload files first.")
     else:
         summary = summarize(estimates, int(context_limit))
+
         st.subheader("Estimated turn budget")
-        st.metric("Estimated tokens", f"{summary['total_estimated_tokens']:,}", f"{summary['percent_of_limit']}% of limit")
+        st.metric(
+            "Estimated tokens",
+            f"{summary['total_estimated_tokens']:,}",
+            f"{summary['percent_of_limit']}% of limit",
+        )
         st.progress(min(summary["total_estimated_tokens"] / int(context_limit), 1.0))
 
         status = summary["status"]
@@ -52,18 +72,22 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
         rows = []
         for e in sorted(estimates, key=lambda x: x.estimated_tokens, reverse=True):
-            rows.append({
-                "File": Path(e.file).name,
-                "Type": e.extension,
-                "Size MB": e.size_mb,
-                "Characters": e.characters,
-                "Words": e.words,
-                "Estimated tokens": e.estimated_tokens,
-                "% of limit": round(e.estimated_tokens / int(context_limit) * 100, 1),
-                "Risk": e.risk_band,
-                "Notes": e.extraction_notes,
-            })
+            rows.append(
+                {
+                    "File": Path(e.file).name,
+                    "Type": e.extension,
+                    "Size MB": e.size_mb,
+                    "Characters": e.characters,
+                    "Words": e.words,
+                    "Estimated tokens": e.estimated_tokens,
+                    "% of limit": round(e.estimated_tokens / int(context_limit) * 100, 1),
+                    "Risk": e.risk_band,
+                    "Notes": e.extraction_notes,
+                }
+            )
+
         df = pd.DataFrame(rows)
+
         st.subheader("Per-file estimates")
         st.dataframe(df, use_container_width=True, hide_index=True)
 
@@ -72,7 +96,12 @@ with tempfile.TemporaryDirectory() as tmpdir:
             st.write(f"- **{Path(item['file']).name}** — {item['estimated_tokens']:,} tokens")
 
         csv = df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download CSV report", csv, "spidey_context_budget_report.csv", "text/csv")
+        st.download_button(
+            "Download CSV report",
+            csv,
+            "spidey_context_budget_report.csv",
+            "text/csv",
+        )
 
 st.divider()
 st.markdown(
