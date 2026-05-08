@@ -11,13 +11,13 @@ from token_estimator import DEFAULT_CONTEXT_LIMIT, estimate_file, estimate_promp
 st.set_page_config(page_title="Spidey Context Budget Estimator", layout="wide")
 
 st.title("Spidey V2 Context Budget Estimator")
-st.caption("Estimate parsed/extracted text tokens before submitting a turn. This is an approximation, not an exact Claude tokenizer.")
+st.caption("Estimate parsed/extracted text tokens from PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, HTML, and XML files. This is an approximation, not an exact Claude tokenizer.")
 
 context_limit = st.number_input("Context limit", value=DEFAULT_CONTEXT_LIMIT, step=50_000, min_value=50_000)
 prompt_text = st.text_area("Paste prompt text here", height=180, placeholder="Optional: paste the turn prompt to include it in the budget.")
 files = st.file_uploader(
     "Upload files to estimate",
-    type=["pdf", "docx", "xlsx", "csv", "txt", "md"],
+    type=["pdf", "docx", "pptx", "xlsx", "csv", "txt", "md", "html", "htm", "xml"],
     accept_multiple_files=True,
 )
 
@@ -79,6 +79,8 @@ st.divider()
 st.markdown(
     """
 **Interpretation:** MB is not the important metric. The important estimate is extracted text tokens after the files are parsed. A small but dense PDF can be riskier than a large image-heavy PDF.
+
+**Supported extraction:** PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, HTML, and XML. Image-only content is not OCR-scanned in this prototype.
 
 **Recommended bands:** under 700k is usually safer, 700k–850k needs caution, 850k–950k is risky, and above 950k is likely to fail once hidden overhead is included.
 """
