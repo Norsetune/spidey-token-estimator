@@ -26,12 +26,11 @@ if st.button("Estimate context budget", type="primary"):
     if prompt_text.strip():
         estimates.append(estimate_prompt(prompt_text, int(context_limit)))
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        for uploaded in files:
-            suffix = Path(uploaded.name).suffix
-            tmp_path = Path(tmpdir) / uploaded.name
-            tmp_path.write_bytes(uploaded.getvalue())
-            estimates.append(estimate_file(tmp_path, int(context_limit)))
+with tempfile.TemporaryDirectory() as tmpdir:
+    for uploaded in files:
+        tmp_path = Path(tmpdir) / uploaded.name
+        tmp_path.write_bytes(uploaded.getvalue())
+        estimates.append(estimate_file(tmp_path, int(context_limit)))
 
     if not estimates:
         st.warning("Add a prompt and/or upload files first.")
