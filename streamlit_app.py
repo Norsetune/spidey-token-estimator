@@ -113,3 +113,12 @@ st.markdown(
 **Recommended bands:** under 700k is usually safer, 700k–850k needs caution, 850k–950k is risky, and above 950k is likely to fail once hidden overhead is included.
 """
 )
+
+st.markdown(
+    """
+    <div style="text-align: center; color: #888; font-size: 0.85rem; margin-top: 2rem;">
+        © Kenneth Pedersen 2026 – Scale.ai
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
