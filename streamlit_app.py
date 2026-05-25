@@ -10,7 +10,7 @@ from token_estimator import DEFAULT_CONTEXT_LIMIT, estimate_file, estimate_promp
 
 st.set_page_config(page_title="Spidey Context Budget Estimator", layout="wide")
 
-st.title("Spidey V2 Context Budget Estimator")
+st.title("Spidey Context Budget Estimator")
 st.caption(
     "Estimate parsed/extracted text tokens from PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, HTML, and XML files. "
     "This is an approximation, not an exact Claude tokenizer."
