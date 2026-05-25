@@ -13,7 +13,7 @@ st.set_page_config(page_title="Spidey Context Budget Estimator", layout="wide")
 st.title("Spidey Context Budget Estimator")
 st.caption(
     "Estimate parsed/extracted text tokens from PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, HTML, and XML files. "
-    "This is an approximation, not an exact Claude tokenizer."
+    "This is an approximation and may differ from the exact tokenizer used by the target model."
 )
 
 context_limit = st.number_input(
