@@ -1,6 +1,6 @@
-# Spidey V2 Context Budget Estimator
+# Spidey Context Budget Estimator
 
-A small local tool for estimating whether a Spidey turn is likely to exceed a 1M-token model context limit after files are parsed.
+A small local tool for estimating whether a Spidey turn is likely to exceed a 100,000-token model context limit after files are parsed.
 
 The key metric is **extracted text tokens**, not file size in MB. This tool extracts text from common file types and estimates tokens per file and for the whole turn.
 
