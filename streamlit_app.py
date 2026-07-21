@@ -1,21 +1,27 @@
-from __future__ import annotations
-
 import tempfile
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from token_estimator import estimate_file, estimate_prompt, summarize
+from token_estimator import (
+    DEFAULT_CONTEXT_LIMIT,
+    estimate_file,
+    estimate_prompt,
+    summarize,
+)
 
-DEFAULT_CONTEXT_LIMIT = 100_000
-
-st.set_page_config(page_title="Spidey Context Budget Estimator", layout="wide")
+st.set_page_config(
+    page_title="Spidey Context Budget Estimator",
+    layout="wide",
+)
 
 st.title("Spidey Context Budget Estimator")
+
 st.caption(
-    "Estimate parsed/extracted text tokens from PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, HTML, and XML files. "
-    "This is an approximation and may differ from the exact tokenizer used by the target model."
+    "Estimate parsed/extracted text tokens from PDF, DOCX, PPTX, XLSX, "
+    "CSV, TXT, MD, HTML, and XML files. This is an approximation and "
+    "may differ from the exact tokenizer used by the target model."
 )
 
 context_limit = st.number_input(
@@ -33,7 +39,18 @@ prompt_text = st.text_area(
 
 files = st.file_uploader(
     "Upload files to estimate",
-    type=["pdf", "docx", "pptx", "xlsx", "csv", "txt", "md", "html", "htm", "xml"],
+    type=[
+        "pdf",
+        "docx",
+        "pptx",
+        "xlsx",
+        "csv",
+        "txt",
+        "md",
+        "html",
+        "htm",
+        "xml",
+    ],
     accept_multiple_files=True,
 )
 
@@ -41,38 +58,65 @@ if st.button("Estimate context budget", type="primary"):
     estimates = []
 
     if prompt_text.strip():
-        estimates.append(estimate_prompt(prompt_text, int(context_limit)))
+        estimates.append(
+            estimate_prompt(
+                prompt_text,
+                int(context_limit),
+            )
+        )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for uploaded in files:
-            tmp_path = Path(tmpdir) / uploaded.name
+            safe_name = Path(uploaded.name).name
+            tmp_path = Path(tmpdir) / safe_name
+
             tmp_path.write_bytes(uploaded.getvalue())
-            estimates.append(estimate_file(tmp_path, int(context_limit)))
+
+            estimates.append(
+                estimate_file(
+                    tmp_path,
+                    int(context_limit),
+                )
+            )
 
     if not estimates:
         st.warning("Add a prompt and/or upload files first.")
+
     else:
-        summary = summarize(estimates, int(context_limit))
+        summary = summarize(
+            estimates,
+            int(context_limit),
+        )
 
         st.subheader("Estimated turn budget")
+
         st.metric(
             "Estimated tokens",
             f"{summary['total_estimated_tokens']:,}",
             f"{summary['percent_of_limit']}% of limit",
         )
 
-        st.progress(
-            min(summary["total_estimated_tokens"] / int(context_limit), 1.0)
+        progress_value = min(
+            summary["total_estimated_tokens"] / int(context_limit),
+            1.0,
         )
+
+        st.progress(progress_value)
 
         status = summary["status"]
 
         if status == "SAFE":
             st.success("Status: SAFE")
+
         elif status == "CLOSE_TO_LIMIT":
             st.warning("Status: CLOSE TO LIMIT")
+
         elif status == "LIKELY_OVER_LIMIT_SOON":
             st.warning("Status: LIKELY OVER LIMIT SOON")
+
+        elif status == "CRITICAL":
+            st.error("Status: CRITICAL")
+
         else:
             st.error(f"Status: {status}")
 
@@ -92,7 +136,9 @@ if st.button("Estimate context budget", type="primary"):
                     "Words": estimate.words,
                     "Estimated tokens": estimate.estimated_tokens,
                     "% of limit": round(
-                        estimate.estimated_tokens / int(context_limit) * 100,
+                        estimate.estimated_tokens
+                        / int(context_limit)
+                        * 100,
                         1,
                     ),
                     "Risk": estimate.risk_band,
@@ -100,11 +146,12 @@ if st.button("Estimate context budget", type="primary"):
                 }
             )
 
-        df = pd.DataFrame(rows)
+        dataframe = pd.DataFrame(rows)
 
         st.subheader("Per-file estimates")
+
         st.dataframe(
-            df,
+            dataframe,
             width="stretch",
             hide_index=True,
         )
@@ -112,35 +159,44 @@ if st.button("Estimate context budget", type="primary"):
         st.subheader("Largest contributors")
 
         for item in summary["largest_contributors"]:
+            filename = Path(item["file"]).name
+            tokens = item["estimated_tokens"]
+
             st.write(
-                f"- **{Path(item['file']).name}** — "
-                f"{item['estimated_tokens']:,} tokens"
+                f"- **{filename}** — {tokens:,} tokens"
             )
 
-        csv = df.to_csv(index=False).encode("utf-8")
+        csv_report = dataframe.to_csv(
+            index=False
+        ).encode("utf-8")
 
         st.download_button(
-            "Download CSV report",
-            csv,
-            "spidey_context_budget_report.csv",
-            "text/csv",
+            label="Download CSV report",
+            data=csv_report,
+            file_name="spidey_context_budget_report.csv",
+            mime="text/csv",
         )
 
 st.divider()
 
 st.markdown(
     """
-**Interpretation:** MB is not the important metric. The important estimate is extracted text tokens after the files are parsed. A small but dense PDF can be riskier than a large image-heavy PDF.
+**Interpretation:** File size in MB is not the most important metric. The relevant estimate is the amount of extracted text after the files are parsed. A small but text-dense PDF can use more context than a larger image-heavy PDF.
 
 **Supported extraction:** PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, HTML, and XML. Image-only content is not OCR-scanned in this prototype.
 
-**Recommended bands:** under 70k is usually safer, 70k–85k needs caution, 85k–95k is risky, and above 95k is likely to fail once hidden overhead is included.
+**Recommended bands:** Under 70,000 tokens is usually safer, 70,000–85,000 requires caution, 85,000–95,000 is risky, and above 95,000 is critical because hidden system and response overhead may also consume context.
 """
 )
 
 st.markdown(
     """
-    <div style="text-align: center; color: #888; font-size: 0.85rem; margin-top: 2rem;">
+    <div style="
+        text-align: center;
+        color: #888;
+        font-size: 0.85rem;
+        margin-top: 2rem;
+    ">
         © Kenneth Pedersen 2026 – Scale.ai
     </div>
     """,
