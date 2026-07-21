@@ -6,7 +6,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from token_estimator import DEFAULT_CONTEXT_LIMIT, estimate_file, estimate_prompt, summarize
+from token_estimator import estimate_file, estimate_prompt, summarize
+
+DEFAULT_CONTEXT_LIMIT = 100_000
 
 st.set_page_config(page_title="Spidey Context Budget Estimator", layout="wide")
 
@@ -19,8 +21,8 @@ st.caption(
 context_limit = st.number_input(
     "Context limit",
     value=DEFAULT_CONTEXT_LIMIT,
-    step=50_000,
-    min_value=50_000,
+    step=10_000,
+    min_value=10_000,
 )
 
 prompt_text = st.text_area(
@@ -58,9 +60,13 @@ if st.button("Estimate context budget", type="primary"):
             f"{summary['total_estimated_tokens']:,}",
             f"{summary['percent_of_limit']}% of limit",
         )
-        st.progress(min(summary["total_estimated_tokens"] / int(context_limit), 1.0))
+
+        st.progress(
+            min(summary["total_estimated_tokens"] / int(context_limit), 1.0)
+        )
 
         status = summary["status"]
+
         if status == "SAFE":
             st.success("Status: SAFE")
         elif status == "CLOSE_TO_LIMIT":
@@ -71,31 +77,48 @@ if st.button("Estimate context budget", type="primary"):
             st.error(f"Status: {status}")
 
         rows = []
-        for e in sorted(estimates, key=lambda x: x.estimated_tokens, reverse=True):
+
+        for estimate in sorted(
+            estimates,
+            key=lambda item: item.estimated_tokens,
+            reverse=True,
+        ):
             rows.append(
                 {
-                    "File": Path(e.file).name,
-                    "Type": e.extension,
-                    "Size MB": e.size_mb,
-                    "Characters": e.characters,
-                    "Words": e.words,
-                    "Estimated tokens": e.estimated_tokens,
-                    "% of limit": round(e.estimated_tokens / int(context_limit) * 100, 1),
-                    "Risk": e.risk_band,
-                    "Notes": e.extraction_notes,
+                    "File": Path(estimate.file).name,
+                    "Type": estimate.extension,
+                    "Size MB": estimate.size_mb,
+                    "Characters": estimate.characters,
+                    "Words": estimate.words,
+                    "Estimated tokens": estimate.estimated_tokens,
+                    "% of limit": round(
+                        estimate.estimated_tokens / int(context_limit) * 100,
+                        1,
+                    ),
+                    "Risk": estimate.risk_band,
+                    "Notes": estimate.extraction_notes,
                 }
             )
 
         df = pd.DataFrame(rows)
 
         st.subheader("Per-file estimates")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(
+            df,
+            width="stretch",
+            hide_index=True,
+        )
 
         st.subheader("Largest contributors")
+
         for item in summary["largest_contributors"]:
-            st.write(f"- **{Path(item['file']).name}** — {item['estimated_tokens']:,} tokens")
+            st.write(
+                f"- **{Path(item['file']).name}** — "
+                f"{item['estimated_tokens']:,} tokens"
+            )
 
         csv = df.to_csv(index=False).encode("utf-8")
+
         st.download_button(
             "Download CSV report",
             csv,
@@ -104,13 +127,14 @@ if st.button("Estimate context budget", type="primary"):
         )
 
 st.divider()
+
 st.markdown(
     """
 **Interpretation:** MB is not the important metric. The important estimate is extracted text tokens after the files are parsed. A small but dense PDF can be riskier than a large image-heavy PDF.
 
 **Supported extraction:** PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, HTML, and XML. Image-only content is not OCR-scanned in this prototype.
 
-**Recommended bands:** under 700k is usually safer, 700k–850k needs caution, 850k–950k is risky, and above 950k is likely to fail once hidden overhead is included.
+**Recommended bands:** under 70k is usually safer, 70k–85k needs caution, 85k–95k is risky, and above 95k is likely to fail once hidden overhead is included.
 """
 )
 
