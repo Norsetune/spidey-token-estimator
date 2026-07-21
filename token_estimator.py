@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Spidey V2 pre-upload context/token estimator.
+Spidey Context Budget Estimator.
 
-Estimates extracted text tokens from prompt + uploaded files before submitting a turn.
-This is an approximation, not an exact Claude tokenizer. It is designed to catch risky
-large files and identify the largest token contributors.
+Estimates extracted text tokens from prompts and uploaded files before submitting a turn.
+This is an approximation, not an exact tokenizer. It is designed to identify large token
+contributors and estimate overall context usage.
 """
 
 from __future__ import annotations
@@ -13,10 +13,10 @@ import argparse
 import csv
 import json
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional
-import xml.etree.ElementTree as ET
 
 from bs4 import BeautifulSoup
 from pptx import Presentation
@@ -34,7 +34,7 @@ SUPPORTED_EXTENSIONS = {
     ".xml",
 }
 
-DEFAULT_CONTEXT_LIMIT = 1_000_000
+DEFAULT_CONTEXT_LIMIT = 100_000
 
 
 @dataclass
@@ -52,43 +52,66 @@ class FileEstimate:
 def clean_text(text: str) -> str:
     if not text:
         return ""
+
     text = text.replace("\x00", " ")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
+
     return text.strip()
 
 
 def estimate_tokens(text: str) -> int:
-    """Rough token estimate. Uses tiktoken if available, otherwise char/word heuristic."""
+    """
+    Estimate the number of tokens in extracted text.
+
+    Uses tiktoken when available. Otherwise, it falls back to a conservative
+    character- and word-based heuristic.
+    """
     text = text or ""
+
     try:
         import tiktoken  # type: ignore
 
-        # cl100k_base is not Claude's tokenizer, but it is a useful proxy.
-        enc = tiktoken.get_encoding("cl100k_base")
-        return len(enc.encode(text))
+        # cl100k_base is not necessarily the target model's tokenizer,
+        # but it provides a useful approximation.
+        encoder = tiktoken.get_encoding("cl100k_base")
+        return len(encoder.encode(text))
+
     except Exception:
-        chars = len(text)
+        characters = len(text)
         words = len(re.findall(r"\S+", text))
-        # English technical text often lands between chars/4 and words*1.25-1.45.
-        # Use the more conservative/larger value.
-        return int(max(chars / 4.0, words * 1.35))
+
+        # English technical text often falls between characters / 4
+        # and words multiplied by approximately 1.25–1.45.
+        # Use the larger value for a more conservative estimate.
+        return int(max(characters / 4.0, words * 1.35))
 
 
 def risk_band(tokens: int, total_limit: int = DEFAULT_CONTEXT_LIMIT) -> str:
-    pct = tokens / total_limit
-    if pct >= 0.95:
+    if total_limit <= 0:
+        raise ValueError("The context limit must be greater than zero.")
+
+    percentage = tokens / total_limit
+
+    if percentage >= 0.95:
         return "CRITICAL"
-    if pct >= 0.85:
+
+    if percentage >= 0.85:
         return "LIKELY_OVER_LIMIT_SOON"
-    if pct >= 0.70:
+
+    if percentage >= 0.70:
         return "CLOSE_TO_LIMIT"
-    if pct >= 0.40:
+
+    if percentage >= 0.40:
         return "WATCH"
+
     return "SAFE"
 
 
-def extract_pdf(path: Path, max_pages: Optional[int] = None) -> tuple[str, str]:
+def extract_pdf(
+    path: Path,
+    max_pages: Optional[int] = None,
+) -> tuple[str, str]:
     try:
         import fitz  # PyMuPDF
     except Exception as exc:
@@ -98,12 +121,16 @@ def extract_pdf(path: Path, max_pages: Optional[int] = None) -> tuple[str, str]:
     chunks = []
 
     try:
-        with fitz.open(path) as doc:
-            page_count = len(doc)
-            pages_to_read = page_count if max_pages is None else min(page_count, max_pages)
+        with fitz.open(path) as document:
+            page_count = len(document)
+            pages_to_read = (
+                page_count
+                if max_pages is None
+                else min(page_count, max_pages)
+            )
 
-            for i in range(pages_to_read):
-                page = doc.load_page(i)
+            for page_index in range(pages_to_read):
+                page = document.load_page(page_index)
                 chunks.append(page.get_text("text"))
 
             notes.append(f"PDF pages read: {pages_to_read}/{page_count}")
@@ -126,30 +153,35 @@ def extract_docx(path: Path) -> tuple[str, str]:
     chunks = []
 
     try:
-        d = docx.Document(str(path))
+        document = docx.Document(str(path))
 
-        for p in d.paragraphs:
-            if p.text:
-                chunks.append(p.text)
+        for paragraph in document.paragraphs:
+            if paragraph.text:
+                chunks.append(paragraph.text)
 
-        for table in d.tables:
+        for table in document.tables:
             for row in table.rows:
-                chunks.append("\t".join(cell.text for cell in row.cells))
+                chunks.append(
+                    "\t".join(cell.text for cell in row.cells)
+                )
 
-        return clean_text("\n".join(chunks)), (
-            f"DOCX paragraphs: {len(d.paragraphs)}, tables: {len(d.tables)}"
+        notes = (
+            f"DOCX paragraphs: {len(document.paragraphs)}, "
+            f"tables: {len(document.tables)}"
         )
+
+        return clean_text("\n".join(chunks)), notes
 
     except Exception as exc:
         return "", f"DOCX extraction failed: {exc}"
 
 
 def extract_pptx_text(path: Path) -> str:
-    prs = Presentation(path)
+    presentation = Presentation(path)
     parts = []
 
-    for slide_idx, slide in enumerate(prs.slides, start=1):
-        parts.append(f"\n--- Slide {slide_idx} ---\n")
+    for slide_index, slide in enumerate(presentation.slides, start=1):
+        parts.append(f"\n--- Slide {slide_index} ---\n")
 
         for shape in slide.shapes:
             if hasattr(shape, "text") and shape.text:
@@ -157,13 +189,19 @@ def extract_pptx_text(path: Path) -> str:
 
         if slide.has_notes_slide:
             notes_text_frame = slide.notes_slide.notes_text_frame
+
             if notes_text_frame and notes_text_frame.text:
-                parts.append(f"\n[Speaker notes]\n{notes_text_frame.text}")
+                parts.append(
+                    f"\n[Speaker notes]\n{notes_text_frame.text}"
+                )
 
     return "\n".join(parts)
 
 
-def extract_xlsx(path: Path, max_cells: Optional[int] = None) -> tuple[str, str]:
+def extract_xlsx(
+    path: Path,
+    max_cells: Optional[int] = None,
+) -> tuple[str, str]:
     try:
         from openpyxl import load_workbook
     except Exception as exc:
@@ -173,71 +211,111 @@ def extract_xlsx(path: Path, max_cells: Optional[int] = None) -> tuple[str, str]
     cell_count = 0
 
     try:
-        wb = load_workbook(filename=path, read_only=True, data_only=False)
-        sheet_count = len(wb.sheetnames)
+        workbook = load_workbook(
+            filename=path,
+            read_only=True,
+            data_only=False,
+        )
 
-        for ws in wb.worksheets:
-            chunks.append(f"\n[SHEET: {ws.title}]\n")
+        sheet_count = len(workbook.sheetnames)
 
-            for row in ws.iter_rows():
-                vals = []
+        for worksheet in workbook.worksheets:
+            chunks.append(f"\n[SHEET: {worksheet.title}]\n")
+
+            for row in worksheet.iter_rows():
+                values = []
 
                 for cell in row:
                     if cell.value is not None:
-                        vals.append(str(cell.value))
+                        values.append(str(cell.value))
                         cell_count += 1
 
-                        if max_cells is not None and cell_count >= max_cells:
-                            chunks.append("\t".join(vals))
-                            return clean_text("\n".join(chunks)), (
-                                f"XLSX sheets: {sheet_count}; cells read: {cell_count}; "
+                        if (
+                            max_cells is not None
+                            and cell_count >= max_cells
+                        ):
+                            chunks.append("\t".join(values))
+
+                            notes = (
+                                f"XLSX sheets: {sheet_count}; "
+                                f"cells read: {cell_count}; "
                                 "truncated by max-cells option"
                             )
 
-                if vals:
-                    chunks.append("\t".join(vals))
+                            return (
+                                clean_text("\n".join(chunks)),
+                                notes,
+                            )
 
-        return clean_text("\n".join(chunks)), (
-            f"XLSX sheets: {sheet_count}; non-empty cells read: {cell_count}"
+                if values:
+                    chunks.append("\t".join(values))
+
+        notes = (
+            f"XLSX sheets: {sheet_count}; "
+            f"non-empty cells read: {cell_count}"
         )
+
+        return clean_text("\n".join(chunks)), notes
 
     except Exception as exc:
         return "", f"XLSX extraction failed: {exc}"
 
 
-def extract_csv(path: Path, max_rows: Optional[int] = None) -> tuple[str, str]:
+def extract_csv(
+    path: Path,
+    max_rows: Optional[int] = None,
+) -> tuple[str, str]:
     chunks = []
-    rows = 0
+    row_count = 0
 
     try:
-        with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
-            sample = f.read(4096)
-            f.seek(0)
+        with open(
+            path,
+            "r",
+            encoding="utf-8-sig",
+            errors="replace",
+            newline="",
+        ) as file:
+            sample = file.read(4096)
+            file.seek(0)
 
             try:
                 dialect = csv.Sniffer().sniff(sample)
             except Exception:
                 dialect = csv.excel
 
-            reader = csv.reader(f, dialect)
+            reader = csv.reader(file, dialect)
 
             for row in reader:
-                rows += 1
+                row_count += 1
                 chunks.append("\t".join(row))
 
-                if max_rows is not None and rows >= max_rows:
-                    return clean_text("\n".join(chunks)), (
-                        f"CSV rows read: {rows}; truncated by max-rows option"
+                if (
+                    max_rows is not None
+                    and row_count >= max_rows
+                ):
+                    notes = (
+                        f"CSV rows read: {row_count}; "
+                        "truncated by max-rows option"
                     )
 
-        return clean_text("\n".join(chunks)), f"CSV rows read: {rows}"
+                    return clean_text("\n".join(chunks)), notes
+
+        return (
+            clean_text("\n".join(chunks)),
+            f"CSV rows read: {row_count}",
+        )
 
     except Exception as exc:
         return "", f"CSV extraction failed: {exc}"
 
 
 def extract_html_text(path: Path) -> str:
-    raw = path.read_text(encoding="utf-8", errors="ignore")
+    raw = path.read_text(
+        encoding="utf-8",
+        errors="ignore",
+    )
+
     soup = BeautifulSoup(raw, "html.parser")
 
     for tag in soup(["script", "style", "noscript"]):
@@ -247,7 +325,10 @@ def extract_html_text(path: Path) -> str:
 
 
 def extract_xml_text(path: Path) -> str:
-    raw = path.read_text(encoding="utf-8", errors="ignore")
+    raw = path.read_text(
+        encoding="utf-8",
+        errors="ignore",
+    )
 
     try:
         root = ET.fromstring(raw)
@@ -256,7 +337,7 @@ def extract_xml_text(path: Path) -> str:
 
     parts = []
 
-    def walk(node, depth=0):
+    def walk(node, depth: int = 0) -> None:
         if node.tag:
             parts.append(f"{'  ' * depth}<{node.tag}>")
 
@@ -270,76 +351,107 @@ def extract_xml_text(path: Path) -> str:
             parts.append(node.tail.strip())
 
     walk(root)
+
     return "\n".join(parts)
 
 
 def extract_text(path: Path) -> tuple[str, str]:
-    ext = path.suffix.lower()
+    extension = path.suffix.lower()
 
-    if ext == ".pdf":
+    if extension == ".pdf":
         return extract_pdf(path)
 
-    if ext == ".docx":
+    if extension == ".docx":
         return extract_docx(path)
 
-    if ext == ".pptx":
+    if extension == ".pptx":
         try:
             text = extract_pptx_text(path)
-            return clean_text(text), "PPTX slides and speaker notes read"
+
+            return (
+                clean_text(text),
+                "PPTX slides and speaker notes read",
+            )
+
         except Exception as exc:
             return "", f"PPTX extraction failed: {exc}"
 
-    if ext == ".xlsx":
+    if extension == ".xlsx":
         return extract_xlsx(path)
 
-    if ext == ".csv":
+    if extension == ".csv":
         return extract_csv(path)
 
-    if ext in {".txt", ".md"}:
+    if extension in {".txt", ".md"}:
         try:
+            text = path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+
             return (
-                clean_text(path.read_text(encoding="utf-8", errors="replace")),
+                clean_text(text),
                 "Plain text/Markdown read",
             )
+
         except Exception as exc:
             return "", f"Text extraction failed: {exc}"
 
-    if ext in {".html", ".htm"}:
+    if extension in {".html", ".htm"}:
         try:
             text = extract_html_text(path)
-            return clean_text(text), "HTML text extracted with scripts/styles removed"
+
+            return (
+                clean_text(text),
+                "HTML text extracted with scripts/styles removed",
+            )
+
         except Exception as exc:
             return "", f"HTML extraction failed: {exc}"
 
-    if ext == ".xml":
+    if extension == ".xml":
         try:
             text = extract_xml_text(path)
-            return clean_text(text), "XML text extracted from element tree"
+
+            return (
+                clean_text(text),
+                "XML text extracted from element tree",
+            )
+
         except Exception as exc:
             return "", f"XML extraction failed: {exc}"
 
-    return "", f"Unsupported extension: {ext}"
+    return "", f"Unsupported extension: {extension}"
 
 
 def iter_files(paths: Iterable[Path]) -> Iterable[Path]:
     for path in paths:
         if path.is_dir():
-            for p in sorted(path.rglob("*")):
-                if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS:
-                    yield p
+            for candidate in sorted(path.rglob("*")):
+                if (
+                    candidate.is_file()
+                    and candidate.suffix.lower()
+                    in SUPPORTED_EXTENSIONS
+                ):
+                    yield candidate
 
         elif path.is_file():
             if path.suffix.lower() == ".zip":
-                # For safety, do not auto-extract zip. Tell user to unzip intentionally.
+                # ZIP files are not automatically extracted.
+                # Users should unzip them intentionally before scanning.
                 continue
 
             if path.suffix.lower() in SUPPORTED_EXTENSIONS:
                 yield path
 
 
-def estimate_file(path: Path, context_limit: int = DEFAULT_CONTEXT_LIMIT) -> FileEstimate:
+def estimate_file(
+    path: Path,
+    context_limit: int = DEFAULT_CONTEXT_LIMIT,
+) -> FileEstimate:
     text, notes = extract_text(path)
-    chars = len(text)
+
+    characters = len(text)
     words = len(re.findall(r"\S+", text))
     tokens = estimate_tokens(text)
 
@@ -352,7 +464,7 @@ def estimate_file(path: Path, context_limit: int = DEFAULT_CONTEXT_LIMIT) -> Fil
         file=str(path),
         extension=path.suffix.lower(),
         size_mb=round(size_mb, 2),
-        characters=chars,
+        characters=characters,
         words=words,
         estimated_tokens=tokens,
         risk_band=risk_band(tokens, context_limit),
@@ -360,9 +472,13 @@ def estimate_file(path: Path, context_limit: int = DEFAULT_CONTEXT_LIMIT) -> Fil
     )
 
 
-def estimate_prompt(prompt: str, context_limit: int = DEFAULT_CONTEXT_LIMIT) -> FileEstimate:
+def estimate_prompt(
+    prompt: str,
+    context_limit: int = DEFAULT_CONTEXT_LIMIT,
+) -> FileEstimate:
     text = prompt or ""
-    chars = len(text)
+
+    characters = len(text)
     words = len(re.findall(r"\S+", text))
     tokens = estimate_tokens(text)
 
@@ -370,7 +486,7 @@ def estimate_prompt(prompt: str, context_limit: int = DEFAULT_CONTEXT_LIMIT) -> 
         file="[PROMPT_TEXT]",
         extension="prompt",
         size_mb=0.0,
-        characters=chars,
+        characters=characters,
         words=words,
         estimated_tokens=tokens,
         risk_band=risk_band(tokens, context_limit),
@@ -378,70 +494,128 @@ def estimate_prompt(prompt: str, context_limit: int = DEFAULT_CONTEXT_LIMIT) -> 
     )
 
 
-def summarize(estimates: List[FileEstimate], context_limit: int = DEFAULT_CONTEXT_LIMIT) -> dict:
-    total = sum(e.estimated_tokens for e in estimates)
-    pct = total / context_limit * 100
+def summarize(
+    estimates: List[FileEstimate],
+    context_limit: int = DEFAULT_CONTEXT_LIMIT,
+) -> dict:
+    if context_limit <= 0:
+        raise ValueError("The context limit must be greater than zero.")
+
+    total = sum(
+        estimate.estimated_tokens
+        for estimate in estimates
+    )
+
+    percentage = total / context_limit * 100
 
     if total >= context_limit:
         status = "OVER_LIMIT"
-    elif pct >= 95:
+
+    elif percentage >= 95:
         status = "CRITICAL"
-    elif pct >= 85:
+
+    elif percentage >= 85:
         status = "LIKELY_OVER_LIMIT_SOON"
-    elif pct >= 70:
+
+    elif percentage >= 70:
         status = "CLOSE_TO_LIMIT"
+
     else:
         status = "SAFE"
 
-    largest = sorted(estimates, key=lambda e: e.estimated_tokens, reverse=True)[:5]
+    largest = sorted(
+        estimates,
+        key=lambda estimate: estimate.estimated_tokens,
+        reverse=True,
+    )[:5]
 
     return {
         "context_limit": context_limit,
         "total_estimated_tokens": total,
-        "percent_of_limit": round(pct, 1),
+        "percent_of_limit": round(percentage, 1),
         "status": status,
-        "largest_contributors": [asdict(e) for e in largest],
+        "largest_contributors": [
+            asdict(estimate)
+            for estimate in largest
+        ],
     }
 
 
-def print_table(estimates: List[FileEstimate], context_limit: int) -> None:
-    estimates_sorted = sorted(estimates, key=lambda e: e.estimated_tokens, reverse=True)
+def print_table(
+    estimates: List[FileEstimate],
+    context_limit: int,
+) -> None:
+    estimates_sorted = sorted(
+        estimates,
+        key=lambda estimate: estimate.estimated_tokens,
+        reverse=True,
+    )
 
     print("\nEstimated extracted-token budget")
     print("=" * 95)
-    print(f"{'Tokens':>10}  {'%Limit':>7}  {'Words':>9}  {'MB':>7}  {'Risk':<22}  File")
+
+    print(
+        f"{'Tokens':>10}  "
+        f"{'%Limit':>7}  "
+        f"{'Words':>9}  "
+        f"{'MB':>7}  "
+        f"{'Risk':<22}  "
+        "File"
+    )
+
     print("-" * 95)
 
-    for e in estimates_sorted:
-        pct = e.estimated_tokens / context_limit * 100
+    for estimate in estimates_sorted:
+        percentage = (
+            estimate.estimated_tokens
+            / context_limit
+            * 100
+        )
+
         print(
-            f"{e.estimated_tokens:>10,}  "
-            f"{pct:>6.1f}%  "
-            f"{e.words:>9,}  "
-            f"{e.size_mb:>7.2f}  "
-            f"{e.risk_band:<22}  "
-            f"{Path(e.file).name}"
+            f"{estimate.estimated_tokens:>10,}  "
+            f"{percentage:>6.1f}%  "
+            f"{estimate.words:>9,}  "
+            f"{estimate.size_mb:>7.2f}  "
+            f"{estimate.risk_band:<22}  "
+            f"{Path(estimate.file).name}"
         )
 
     print("-" * 95)
-    summary = summarize(estimates, context_limit)
+
+    summary = summarize(
+        estimates,
+        context_limit,
+    )
+
     print(
         f"TOTAL: {summary['total_estimated_tokens']:,} / "
-        f"{context_limit:,} tokens ({summary['percent_of_limit']}%)"
+        f"{context_limit:,} tokens "
+        f"({summary['percent_of_limit']}%)"
     )
+
     print(f"STATUS: {summary['status']}")
-    print("\nNote: This estimates parsed/extracted text tokens, not file size. Claude's exact tokenizer may differ.")
+
+    print(
+        "\nNote: This estimates parsed/extracted text tokens rather than "
+        "file size. The exact tokenizer used by the target model may differ."
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Estimate extracted token count for Spidey V2 prompt + files."
+        description=(
+            "Estimate extracted token counts for prompts and supported files."
+        )
     )
 
     parser.add_argument(
         "paths",
         nargs="+",
-        help="Files or folders to scan. Supported: PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, HTML, XML.",
+        help=(
+            "Files or folders to scan. Supported: PDF, DOCX, PPTX, "
+            "XLSX, CSV, TXT, MD, HTML, and XML."
+        ),
     )
 
     parser.add_argument(
@@ -453,40 +627,86 @@ def main() -> None:
         "--limit",
         type=int,
         default=DEFAULT_CONTEXT_LIMIT,
-        help="Context limit. Default: 1,000,000 tokens.",
+        help="Context limit. Default: 100,000 tokens.",
     )
 
     parser.add_argument(
         "--json-out",
-        help="Optional path to write JSON report.",
+        help="Optional path for the generated JSON report.",
     )
 
     args = parser.parse_args()
+
+    if args.limit <= 0:
+        parser.error("--limit must be greater than zero.")
 
     estimates: List[FileEstimate] = []
 
     if args.prompt_file:
         prompt_path = Path(args.prompt_file)
-        prompt = prompt_path.read_text(encoding="utf-8", errors="replace")
-        estimates.append(estimate_prompt(prompt, args.limit))
 
-    files = list(iter_files(Path(p) for p in args.paths))
+        prompt = prompt_path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
 
-    for f in files:
-        estimates.append(estimate_file(f, args.limit))
+        estimates.append(
+            estimate_prompt(
+                prompt,
+                args.limit,
+            )
+        )
 
-    print_table(estimates, args.limit)
+    files = list(
+        iter_files(
+            Path(path)
+            for path in args.paths
+        )
+    )
+
+    for file in files:
+        estimates.append(
+            estimate_file(
+                file,
+                args.limit,
+            )
+        )
+
+    if not estimates:
+        print(
+            "No supported files or prompt text were found."
+        )
+        return
+
+    print_table(
+        estimates,
+        args.limit,
+    )
 
     if args.json_out:
         report = {
-            "summary": summarize(estimates, args.limit),
-            "files": [asdict(e) for e in estimates],
+            "summary": summarize(
+                estimates,
+                args.limit,
+            ),
+            "files": [
+                asdict(estimate)
+                for estimate in estimates
+            ],
         }
+
         Path(args.json_out).write_text(
-            json.dumps(report, indent=2, ensure_ascii=False),
+            json.dumps(
+                report,
+                indent=2,
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
-        print(f"\nJSON report written to: {args.json_out}")
+
+        print(
+            f"\nJSON report written to: {args.json_out}"
+        )
 
 
 if __name__ == "__main__":
