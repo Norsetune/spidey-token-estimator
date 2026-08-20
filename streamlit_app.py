@@ -197,7 +197,7 @@ st.markdown(
         font-size: 0.85rem;
         margin-top: 2rem;
     ">
-        Kenneth Pedersen 2026
+        Kenneth Pedersen · 2026
     </div>
     """,
     unsafe_allow_html=True,
